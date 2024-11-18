@@ -1,220 +1,135 @@
-#[allow(duplicate_alias)]
-module bookstore::store_management {
-    use sui::transfer;
-    use sui::sui::SUI;
+/// Module: bookshop
+module bookstore::bookstore {
+    use sui::tx_context::{sender};
     use sui::coin::{Self, Coin};
-    use sui::clock::{Self, Clock};
-    use sui::object::{Self, UID};
     use sui::balance::{Self, Balance};
-    use sui::tx_context::{Self, TxContext};
-    use std::option::{Option, none, some, is_some, contains, borrow};
+    use sui::sui::SUI;
+    use sui::clock::{Self, Clock, timestamp_ms};
+    use std::string::{String};
+    use sui::dynamic_object_field as dof;
+    use sui::dynamic_field as df;
 
-    // Error codes
-    const EInvalidTransaction: u64 = 1;
-    const EInvalidBook: u64 = 2;
-    const EDispute: u64 = 3;
-    const EAlreadyResolved: u64 = 4;
-    const ENotStore: u64 = 5;
-    const EInvalidRefundRequest: u64 = 6;
-    const EDeadlinePassed: u64 = 7;
-    const EInsufficientEscrow: u64 = 8;
+    const EBookBuyAmountInvalid: u64 = 0;
+    const EBookPriceNotChanged: u64 = 1;
 
-    // Structs
-
-    public struct Transaction has key, store {
+    
+    //AdminCap is the capability for admin role management
+    public struct AdminCap has key {
         id: UID,
-        customer: address,
-        book: vector<u8>,
-        quantity: u64,
+    }
+    
+    public struct Item has store, copy, drop { id: ID }
+
+    public struct Listing has store, copy, drop { id: ID, is_exclusive: bool }
+
+    // shared object based on kiosk
+    public struct Shop has key {
+        id: UID,
+        owner: address,
+        item_count: u64,
+        balance: Balance<SUI>
+    }
+
+    // object for rent or buy 
+    public struct Book has key, store {
+        id: UID,
+        inner: ID,
+        name: String,
         price: u64,
-        escrow: Balance<SUI>,
-        dispute: bool,
-        rating: Option<u64>,
-        status: vector<u8>,
-        store: Option<address>,
-        transactionFulfilled: bool,
-        created_at: u64,
-        deadline: u64,
+        create_at: u64,
+        update_at: u64,
     }
 
-    public struct BookReview has key, store {
-        id: UID,
-        customer: address,
-        review: vector<u8>,
-    }
-
-    // Accessors
-
-    public entry fun get_book(transaction: &Transaction): vector<u8> {
-        transaction.book
-    }
-
-    public entry fun get_transaction_price(transaction: &Transaction): u64 {
-        transaction.price
-    }
-
-    public entry fun get_transaction_status(transaction: &Transaction): vector<u8> {
-        transaction.status
-    }
-
-    public entry fun get_transaction_deadline(transaction: &Transaction): u64 {
-        transaction.deadline
-    }
-
-    // Entry functions
-
-    public entry fun create_transaction(
-        book: vector<u8>, quantity: u64, price: u64, clock: &Clock, duration: u64,
-        open: vector<u8>, ctx: &mut TxContext
-    ) {
-        let transaction_id = object::new(ctx);
-        let deadline = clock::timestamp_ms(clock) + duration;
-        transfer::share_object(Transaction {
-            id: transaction_id,
-            customer: tx_context::sender(ctx),
-            store: none(),
-            book,
-            quantity,
-            rating: none(),
-            status: open,
-            price,
-            escrow: balance::zero(),
-            transactionFulfilled: false,
-            dispute: false,
-            created_at: clock::timestamp_ms(clock),
-            deadline,
-        });
-    }
-
-    public entry fun accept_transaction(transaction: &mut Transaction, ctx: &mut TxContext) {
-        assert!(!is_some(&transaction.store), EInvalidTransaction);
-        transaction.store = some(tx_context::sender(ctx));
-    }
-
-    public entry fun fulfill_transaction(transaction: &mut Transaction, clock: &Clock, ctx: &mut TxContext) {
-        assert!(contains(&transaction.store, &tx_context::sender(ctx)), EInvalidBook);
-        assert!(clock::timestamp_ms(clock) < transaction.deadline, EDeadlinePassed);
-        transaction.transactionFulfilled = true;
-    }
-
-    public entry fun mark_transaction_complete(transaction: &mut Transaction, ctx: &mut TxContext) {
-        assert!(contains(&transaction.store, &tx_context::sender(ctx)), ENotStore);
-        transaction.transactionFulfilled = true;
-    }
-
-    public entry fun dispute_transaction(transaction: &mut Transaction, ctx: &mut TxContext) {
-        assert!(transaction.customer == tx_context::sender(ctx), EDispute);
-        transaction.dispute = true;
-    }
-
-    public entry fun resolve_dispute(
-        transaction: &mut Transaction, resolved: bool, ctx: &mut TxContext
-    ) {
-        assert!(transaction.customer == tx_context::sender(ctx), EDispute);
-        assert!(transaction.dispute, EAlreadyResolved);
-        assert!(is_some(&transaction.store), EInvalidTransaction);
-        let escrow_amount = balance::value(&transaction.escrow);
-        let escrow_coin = coin::take(&mut transaction.escrow, escrow_amount, ctx);
-        if (resolved) {
-            let store = *borrow(&transaction.store);
-            transfer::public_transfer(escrow_coin, store);
-        } else {
-            transfer::public_transfer(escrow_coin, transaction.customer);
+    fun init(ctx: &mut TxContext) {
+        let admin_address = tx_context::sender(ctx);
+        let admin_cap = AdminCap {
+            id: object::new(ctx)
         };
+        transfer::transfer(admin_cap, admin_address);
 
-        transaction.store = none();
-        transaction.transactionFulfilled = false;
-        transaction.dispute = false;
-    }
-
-    public entry fun release_payment(
-        transaction: &mut Transaction, clock: &Clock, review: vector<u8>, ctx: &mut TxContext
-    ) {
-        assert!(transaction.customer == tx_context::sender(ctx), ENotStore);
-        assert!(transaction.transactionFulfilled && !transaction.dispute, EInvalidBook);
-        assert!(clock::timestamp_ms(clock) > transaction.deadline, EDeadlinePassed);
-        assert!(is_some(&transaction.store), EInvalidTransaction);
-        let store = *borrow(&transaction.store);
-        let escrow_amount = balance::value(&transaction.escrow);
-        assert!(escrow_amount > 0, EInsufficientEscrow);
-        let escrow_coin = coin::take(&mut transaction.escrow, escrow_amount, ctx);
-        transfer::public_transfer(escrow_coin, store);
-
-        let bookReview = BookReview {
+        let shop = Shop {
             id: object::new(ctx),
-            customer: tx_context::sender(ctx),
-            review,
+            owner: sender(ctx),
+            item_count:0,
+            balance: balance::zero()
         };
-
-        transfer::public_transfer(bookReview, tx_context::sender(ctx));
-
-        transaction.store = none();
-        transaction.transactionFulfilled = false;
-        transaction.dispute = false;
+        transfer::share_object(shop);
     }
 
-    public entry fun add_funds(transaction: &mut Transaction, amount: Coin<SUI>, ctx: &mut TxContext) {
-        assert!(tx_context::sender(ctx) == transaction.customer, ENotStore);
-        let added_balance = coin::into_balance(amount);
-        balance::join(&mut transaction.escrow, added_balance);
-    }
+    // create new book
+    public fun new(
+        _: &AdminCap,
+        name_: String,
+        price: u64,
+        c: &Clock,
+        ctx: &mut TxContext
+    ) : Book {
+        let id_ = object::new(ctx);
+        let inner_ = object::uid_to_inner(&id_);
 
-    public entry fun cancel_transaction(transaction: &mut Transaction, ctx: &mut TxContext) {
-        assert!(
-            transaction.customer == tx_context::sender(ctx) || contains(&transaction.store, &tx_context::sender(ctx)),
-            ENotStore
-        );
-
-        if (is_some(&transaction.store) && !transaction.transactionFulfilled && !transaction.dispute) {
-            let escrow_amount = balance::value(&transaction.escrow);
-            let escrow_coin = coin::take(&mut transaction.escrow, escrow_amount, ctx);
-            transfer::public_transfer(escrow_coin, transaction.customer);
+        let book = Book {
+            id: id_,
+            inner: inner_,
+            name: name_,
+            price: price,
+            create_at: timestamp_ms(c),
+            update_at: timestamp_ms(c)
         };
-
-        transaction.store = none();
-        transaction.transactionFulfilled = false;
-        transaction.dispute = false;
+        book
     }
 
-    public entry fun rate_store(transaction: &mut Transaction, rating: u64, ctx: &mut TxContext) {
-        assert!(transaction.customer == tx_context::sender(ctx), ENotStore);
-        transaction.rating = some(rating);
+    public fun new_name(self: &mut Book, name: String, clock: &Clock) {
+        self.name = name;
+        self.update_at = timestamp_ms(clock);
     }
 
-    public entry fun update_book(transaction: &mut Transaction, new_book: vector<u8>, ctx: &mut TxContext) {
-        assert!(transaction.customer == tx_context::sender(ctx), ENotStore);
-        transaction.book = new_book;
+    public fun new_price(self: &mut Book, price: u64, clock: &Clock, _ctx: &mut TxContext) {
+        assert!(self.price != price, EBookPriceNotChanged);
+        self.price = price;
+        self.update_at = clock::timestamp_ms(clock);
     }
 
-    public entry fun update_transaction_price(transaction: &mut Transaction, new_price: u64, ctx: &mut TxContext) {
-        assert!(transaction.customer == tx_context::sender(ctx), ENotStore);
-        transaction.price = new_price;
+    public fun list(_: &AdminCap, self: &mut Shop, book: Book, price: u64) {
+        let id_ = book.inner;
+        place_internal(self, book);
+
+        df::add(&mut self.id, Listing { id: id_, is_exclusive: false }, price);
     }
 
-    public entry fun update_transaction_quantity(transaction: &mut Transaction, new_quantity: u64, ctx: &mut TxContext) {
-        assert!(transaction.customer == tx_context::sender(ctx), ENotStore);
-        transaction.quantity = new_quantity;
+    public fun delist(_: &AdminCap, self: &mut Shop, id: ID) {
+        df::remove<Listing, u64>(&mut self.id, Listing { id, is_exclusive: false });
     }
 
-    public entry fun update_transaction_deadline(transaction: &mut Transaction, new_deadline: u64, ctx: &mut TxContext) {
-        assert!(transaction.customer == tx_context::sender(ctx), ENotStore);
-        transaction.deadline = new_deadline;
+    public fun purchase(self: &mut Shop, id: ID, payment: Coin<SUI>) : Book {
+        let price = df::remove<Listing, u64>(&mut self.id, Listing { id, is_exclusive: false });
+        let item = dof::remove<Item, Book>(&mut self.id, Item { id });
+
+        self.item_count = self.item_count - 1;
+        assert!(price == payment.value(), EBookBuyAmountInvalid);
+        coin::put(&mut self.balance, payment);
+
+        item
     }
 
-    public entry fun update_transaction_status(transaction: &mut Transaction, completed: vector<u8>, ctx: &mut TxContext) {
-        assert!(transaction.customer == tx_context::sender(ctx), ENotStore);
-        transaction.status = completed;
+    public fun withdraw_profits(_: &AdminCap, self: &mut Shop, amount: u64, ctx: &mut TxContext) : Coin<SUI> {
+        coin::take(&mut self.balance, amount, ctx)
     }
 
-    public entry fun request_refund(transaction: &mut Transaction, ctx: &mut TxContext) {
-        assert!(tx_context::sender(ctx) == transaction.customer, ENotStore);
-        assert!(!transaction.transactionFulfilled && !transaction.dispute, EInvalidRefundRequest);
-        let escrow_amount = balance::value(&transaction.escrow);
-        let escrow_coin = coin::take(&mut transaction.escrow, escrow_amount, ctx);
-        transfer::public_transfer(escrow_coin, transaction.customer);
+    public fun GetShopInfoPayAddress(self: &Shop): address {
+        self.owner
+    }
 
-        transaction.store = none();
-        transaction.transactionFulfilled = false;
-        transaction.dispute = false;
+    public fun GetBookCount(self: &Book): u64 {
+        self.price
+    }
+
+    public fun GetBookId(self: &Book): ID {
+        self.inner
+    }
+
+    fun place_internal(self: &mut Shop, book: Book) {
+        self.item_count = self.item_count + 1;
+        dof::add(&mut self.id, Item { id: object::id(&book) }, book)
     }
 }
+

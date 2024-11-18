@@ -131,5 +131,10 @@ module bookstore::bookstore {
         self.item_count = self.item_count + 1;
         dof::add(&mut self.id, Item { id: object::id(&book) }, book)
     }
+
+    #[test_only]
+    public fun test_init(ctx: &mut TxContext) {
+        init(ctx);
+    }
 }
 

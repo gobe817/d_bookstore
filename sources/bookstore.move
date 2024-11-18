@@ -8,6 +8,8 @@ module bookstore::bookstore {
     use std::string::{String};
     use sui::dynamic_object_field as dof;
     use sui::dynamic_field as df;
+    use sui::transfer_policy::{Self as tp, TransferRequest};
+    use sui::package::{Self, Publisher};
 
     const EBookBuyAmountInvalid: u64 = 0;
     const EBookPriceNotChanged: u64 = 1;
@@ -17,10 +19,17 @@ module bookstore::bookstore {
     public struct AdminCap has key {
         id: UID,
     }
+
+    public struct BOOKSTORE has drop {}
     
     public struct Item has store, copy, drop { id: ID }
 
     public struct Listing has store, copy, drop { id: ID, is_exclusive: bool }
+
+    public struct PublisherWrapper has key, store {
+        id: UID,
+        publisher: Publisher
+    }
 
     // shared object based on kiosk
     public struct Shop has key {
@@ -40,8 +49,8 @@ module bookstore::bookstore {
         update_at: u64,
     }
 
-    fun init(ctx: &mut TxContext) {
-        let admin_address = tx_context::sender(ctx);
+    fun init(otw:BOOKSTORE, ctx: &mut TxContext) {
+        let admin_address = ctx.sender();
         let admin_cap = AdminCap {
             id: object::new(ctx)
         };
@@ -53,6 +62,15 @@ module bookstore::bookstore {
             item_count:0,
             balance: balance::zero()
         };
+
+         // define the publisher
+        let publisher_ = package::claim<BOOKSTORE>(otw, ctx);
+        // wrap the publisher and share.
+        transfer::share_object(PublisherWrapper {
+            id: object::new(ctx),
+            publisher: publisher_
+        });
+        // transfer the admincap
         transfer::share_object(shop);
     }
 
@@ -100,7 +118,7 @@ module bookstore::bookstore {
         df::remove<Listing, u64>(&mut self.id, Listing { id, is_exclusive: false });
     }
 
-    public fun purchase(self: &mut Shop, id: ID, payment: Coin<SUI>) : Book {
+    public fun purchase<T: key + store>(self: &mut Shop, id: ID, payment: Coin<SUI>) : (Book, TransferRequest<T>) {
         let price = df::remove<Listing, u64>(&mut self.id, Listing { id, is_exclusive: false });
         let item = dof::remove<Item, Book>(&mut self.id, Item { id });
 
@@ -108,7 +126,7 @@ module bookstore::bookstore {
         assert!(price == payment.value(), EBookBuyAmountInvalid);
         coin::put(&mut self.balance, payment);
 
-        item
+        (item, tp::new_request(id, price, object::id(self)))
     }
 
     public fun withdraw_profits(_: &AdminCap, self: &mut Shop, amount: u64, ctx: &mut TxContext) : Coin<SUI> {
@@ -132,9 +150,24 @@ module bookstore::bookstore {
         dof::add(&mut self.id, Item { id: object::id(&book) }, book)
     }
 
+    public fun new_policy<T>(_: &AdminCap, publish: &PublisherWrapper, ctx: &mut TxContext ) {
+        // set the publisher
+        let publisher = get_publisher(publish);
+        // create an transfer_policy and tp_cap
+        let (transfer_policy, tp_cap) = tp::new<T>(publisher, ctx);
+        // transfer the objects 
+        transfer::public_transfer(tp_cap, ctx.sender());
+        transfer::public_share_object(transfer_policy);
+    }
+
+    fun get_publisher(shared: &PublisherWrapper) : &Publisher {
+        &shared.publisher
+     }
+
     #[test_only]
     public fun test_init(ctx: &mut TxContext) {
-        init(ctx);
+        let otw = BOOKSTORE {};
+        init(otw, ctx);
     }
 }
 

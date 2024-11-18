@@ -6,10 +6,11 @@ module bookstore::bookshop_tests {
     use std::string::{Self, String};
     use sui::coin::{Self, Coin, mint_for_testing};
     use sui::sui::SUI;
+    use sui::transfer_policy::{Self as tp, TransferPolicy};
 
     use std::debug::print;
 
-    use bookstore::bookstore::{Self as bs, Shop, AdminCap, Book, test_init};
+    use bookstore::bookstore::{Self as bs, Shop, AdminCap, Book, test_init, PublisherWrapper};
 
     const ADMIN: address = @0xe;
     const TEST_ADDRESS1: address = @0xeb;
@@ -24,6 +25,11 @@ module bookstore::bookshop_tests {
         next_tx(scenario, ADMIN);
         {
             test_init(ts::ctx(scenario));
+        };
+
+        next_tx(scenario, ADMIN);
+        {
+            helper_new_policy<Book>(scenario);
         };
 
         // create and list 
@@ -42,7 +48,6 @@ module bookstore::bookshop_tests {
             
             bs::list(&cap, &mut self, book, price);
 
-
             ts::return_to_sender(scenario, cap);
             ts::return_shared(self);
             c.share_for_testing();
@@ -54,6 +59,7 @@ module bookstore::bookshop_tests {
         next_tx(scenario, TEST_ADDRESS2);
         {
             let mut self = ts::take_shared<Shop>(scenario);
+            let policy = ts::take_shared<TransferPolicy<Book>>(scenario);
 
             let name = string::utf8(b"name1");
             let price: u64 = 1_000_000_000;
@@ -61,9 +67,11 @@ module bookstore::bookshop_tests {
             let coin_ = mint_for_testing<SUI>(1_000_000_000, ts::ctx(scenario));
 
             
-            let item = bs::purchase(&mut self, asset_id1, coin_);
+            let (item, request) = bs::purchase<Book>(&mut self, asset_id1, coin_);
+            tp::confirm_request<Book>(&policy, request);
             transfer::public_transfer(item, TEST_ADDRESS2);
 
+            ts::return_shared(policy);
             ts::return_shared(self);
         };  
 
@@ -91,6 +99,19 @@ module bookstore::bookshop_tests {
         };
 
         ts::end(scenario_val);
+    }
+    
+    public fun helper_new_policy<T>(scenario: &mut Scenario) {
+        next_tx(scenario, ADMIN);
+        {
+            let admin_cap = ts::take_from_sender<AdminCap>(scenario);
+            let publisher_share = ts::take_shared<PublisherWrapper>(scenario);
+    
+            bs::new_policy<T>(&admin_cap, &publisher_share, ts::ctx(scenario));
+
+            ts::return_to_sender(scenario, admin_cap);
+            ts::return_shared(publisher_share);
+        };
     }
 }
 

@@ -1,173 +1,188 @@
-/// Module: bookshop
 module bookstore::bookstore {
-    use sui::tx_context::{sender};
-    use sui::coin::{Self, Coin};
-    use sui::balance::{Self, Balance};
-    use sui::sui::SUI;
-    use sui::clock::{Self, Clock, timestamp_ms};
+    use sui::balance::{Balance, Self};
+    use sui::coin::{Coin, Self};
     use std::string::{String};
-    use sui::dynamic_object_field as dof;
-    use sui::dynamic_field as df;
-    use sui::transfer_policy::{Self as tp, TransferRequest};
-    use sui::package::{Self, Publisher};
+    use sui::event;
+    use sui::sui::SUI;
 
-    const EBookBuyAmountInvalid: u64 = 0;
-    const EBookPriceNotChanged: u64 = 1;
 
-    
-    //AdminCap is the capability for admin role management
-    public struct AdminCap has key {
+    //errors
+    const ENotOwner: u64 = 0;
+    const EBookNotAvailable: u64 = 2;
+    const ErrorInsufficientAmount: u64 = 3;
+
+    //define data types
+    public struct Bookstore has key, store {
         id: UID,
-    }
-
-    public struct BOOKSTORE has drop {}
-    
-    public struct Item has store, copy, drop { id: ID }
-
-    public struct Listing has store, copy, drop { id: ID, is_exclusive: bool }
-
-    public struct PublisherWrapper has key, store {
-        id: UID,
-        publisher: Publisher
-    }
-
-    // shared object based on kiosk
-    public struct Shop has key {
-        id: UID,
-        owner: address,
-        item_count: u64,
+        name: String,
+        books: vector<Book>,
+        book_count: u64,
         balance: Balance<SUI>
     }
 
-    // object for rent or buy 
     public struct Book has key, store {
         id: UID,
-        inner: ID,
-        name: String,
+        book_id: u64,
+        title: String,
+        description: String,
         price: u64,
-        create_at: u64,
-        update_at: u64,
+        sold: bool,
+        owner: address
     }
 
-    fun init(otw:BOOKSTORE, ctx: &mut TxContext) {
-        let admin_address = ctx.sender();
-        let admin_cap = AdminCap {
-            id: object::new(ctx)
-        };
-        transfer::transfer(admin_cap, admin_address);
+    public struct AdminCap has key {
+        id: UID,
+        bookstore_id: ID
+    }
 
-        let shop = Shop {
-            id: object::new(ctx),
-            owner: sender(ctx),
-            item_count:0,
-            balance: balance::zero()
+    //events
+    public struct BookstoreCreated has drop, copy {
+        name_of_bookstore: String
+    }
+
+    public struct AmountWithdrawn has drop, copy {
+        recipient: address,
+        amount: u64
+    }
+
+    //functions
+
+    //function to create bookstore
+    public entry fun create_bookstore(name: String, ctx: &mut TxContext): String {
+        let id = object::new(ctx);
+        let book_count: u64 = 0;
+        let balance = balance::zero<SUI>();
+        let bookstore_id = object::uid_to_inner(&id);
+        let new_bookstore = Bookstore { 
+            id, 
+            book_count,
+            name,
+            books: vector::empty(),
+            balance
         };
 
-         // define the publisher
-        let publisher_ = package::claim<BOOKSTORE>(otw, ctx);
-        // wrap the publisher and share.
-        transfer::share_object(PublisherWrapper {
+        transfer::transfer(AdminCap {
             id: object::new(ctx),
-            publisher: publisher_
+            bookstore_id,
+        }, tx_context::sender(ctx));
+
+        transfer::share_object(new_bookstore);
+        event::emit(BookstoreCreated {
+            name_of_bookstore: name
         });
-        // transfer the admincap
-        transfer::share_object(shop);
+
+        name
     }
 
-    // create new book
-    public fun new(
-        _: &AdminCap,
-        name_: String,
+    //function to add books to the bookstore
+    public entry fun add_book(
+        owner: &AdminCap,
+        bookstore: &mut Bookstore,
+        title: String,
         price: u64,
-        c: &Clock,
+        description: String,
         ctx: &mut TxContext
-    ) : Book {
-        let id_ = object::new(ctx);
-        let inner_ = object::uid_to_inner(&id_);
-
-        let book = Book {
-            id: id_,
-            inner: inner_,
-            name: name_,
-            price: price,
-            create_at: timestamp_ms(c),
-            update_at: timestamp_ms(c)
+    ) {
+        //verify that only the owner of the bookstore can add books
+        assert!(&owner.bookstore_id == object::uid_to_inner(&bookstore.id), ENotOwner);
+        let book_id = bookstore.books.length();
+        
+        let new_book = Book {
+            id: object::new(ctx),
+            book_id,
+            title,
+            description,
+            price,
+            sold: false,
+            owner: tx_context::sender(ctx),
         };
-        book
+
+        bookstore.books.push_back(new_book);
+        bookstore.book_count = bookstore.book_count + 1;
     }
 
-    public fun new_name(self: &mut Book, name: String, clock: &Clock) {
-        self.name = name;
-        self.update_at = timestamp_ms(clock);
+    //get details of a book
+    public entry fun get_book_details(bookstore: &mut Bookstore, book_id: u64): (u64, String, String, u64, bool) {
+        //check if the book is available
+        assert!(book_id <= bookstore.books.length(), EBookNotAvailable);
+
+        let book = &bookstore.books[book_id];
+        (book.book_id, book.title, book.description, book.price, book.sold)
     }
 
-    public fun new_price(self: &mut Book, price: u64, clock: &Clock, _ctx: &mut TxContext) {
-        assert!(self.price != price, EBookPriceNotChanged);
-        self.price = price;
-        self.update_at = clock::timestamp_ms(clock);
+    //update price of book
+    public entry fun update_book_price(bookstore: &mut Bookstore, owner: &AdminCap, book_id: u64, new_price: u64) {
+        //make sure it's the admin performing the operation
+        assert!(&owner.bookstore_id == object::uid_to_inner(&bookstore.id), ENotOwner);
+        //make sure the book actually exists
+        assert!(book_id <= bookstore.books.length(), EBookNotAvailable);
+        
+        let book = &mut bookstore.books[book_id];
+        book.price = new_price;
     }
 
-    public fun list(_: &AdminCap, self: &mut Shop, book: Book, price: u64) {
-        let id_ = book.inner;
-        place_internal(self, book);
-
-        df::add(&mut self.id, Listing { id: id_, is_exclusive: false }, price);
+    //update description of a book
+    public entry fun update_book_description(bookstore: &mut Bookstore, owner: &AdminCap, book_id: u64, description: String) {
+        //make sure the book is available
+        assert!(book_id <= bookstore.books.length(), EBookNotAvailable);
+        
+        //make sure it's the admin performing the operation
+        assert!(&owner.bookstore_id == object::uid_to_inner(&bookstore.id), ENotOwner);
+        let book = &mut bookstore.books[book_id];
+        book.description = description;
     }
 
-    public fun delist(_: &AdminCap, self: &mut Shop, id: ID) {
-        df::remove<Listing, u64>(&mut self.id, Listing { id, is_exclusive: false });
+    //delist book from bookstore by marking it as sold
+    public entry fun delist_book(
+        bookstore: &mut Bookstore,
+        owner: &AdminCap,
+        book_id: u64
+    ) {
+        //make sure it's the admin performing the operation
+        assert!(&owner.bookstore_id == object::uid_to_inner(&bookstore.id), ENotOwner);
+
+        //check if the book is available
+        assert!(book_id <= bookstore.books.length(), EBookNotAvailable);
+        
+        let book = &mut bookstore.books[book_id];
+        book.sold = true;
     }
 
-    public fun purchase<T: key + store>(self: &mut Shop, id: ID, payment: Coin<SUI>) : (Book, TransferRequest<T>) {
-        let price = df::remove<Listing, u64>(&mut self.id, Listing { id, is_exclusive: false });
-        let item = dof::remove<Item, Book>(&mut self.id, Item { id });
+    //buy book
+    public entry fun buy_book(
+        bookstore: &mut Bookstore,
+        book_id: u64,
+        amount: Coin<SUI>,
+    ) {
+        //check if the book is available
+        assert!(book_id <= bookstore.books.length(), EBookNotAvailable);
 
-        self.item_count = self.item_count - 1;
-        assert!(price == payment.value(), EBookBuyAmountInvalid);
-        coin::put(&mut self.balance, payment);
+        //check if the book is already sold
+        assert!(bookstore.books[book_id].sold == false, EBookNotAvailable);
 
-        (item, tp::new_request(id, price, object::id(self)))
+        //get price
+        let book = &bookstore.books[book_id];
+        //ensure amount is equal to the price of the book
+        assert!(coin::value(&amount) == book.price, ErrorInsufficientAmount);
+    
+        let coin_balance = coin::into_balance(amount);
+        //add the amount to the bookstore balance
+        balance::join(&mut bookstore.balance, coin_balance);
     }
 
-    public fun withdraw_profits(_: &AdminCap, self: &mut Shop, amount: u64, ctx: &mut TxContext) : Coin<SUI> {
-        coin::take(&mut self.balance, amount, ctx)
-    }
+    //owner withdraw profits
+    public entry fun withdraw_funds(user_cap: &AdminCap, bookstore: &mut Bookstore, ctx: &mut TxContext) {
+        //verify it's the owner of the bookstore
+        assert!(object::uid_as_inner(&bookstore.id) == &user_cap.bookstore_id, ENotOwner);
+        
+        let amount: u64 = balance::value(&bookstore.balance);
 
-    public fun GetShopInfoPayAddress(self: &Shop): address {
-        self.owner
-    }
+        let amount_available: Coin<SUI> = coin::take(&mut bookstore.balance, amount, ctx);
 
-    public fun GetBookCount(self: &Book): u64 {
-        self.price
-    }
-
-    public fun GetBookId(self: &Book): ID {
-        self.inner
-    }
-
-    fun place_internal(self: &mut Shop, book: Book) {
-        self.item_count = self.item_count + 1;
-        dof::add(&mut self.id, Item { id: object::id(&book) }, book)
-    }
-
-    public fun new_policy<T>(_: &AdminCap, publish: &PublisherWrapper, ctx: &mut TxContext ) {
-        // set the publisher
-        let publisher = get_publisher(publish);
-        // create an transfer_policy and tp_cap
-        let (transfer_policy, tp_cap) = tp::new<T>(publisher, ctx);
-        // transfer the objects 
-        transfer::public_transfer(tp_cap, ctx.sender());
-        transfer::public_share_object(transfer_policy);
-    }
-
-    fun get_publisher(shared: &PublisherWrapper) : &Publisher {
-        &shared.publisher
-     }
-
-    #[test_only]
-    public fun test_init(ctx: &mut TxContext) {
-        let otw = BOOKSTORE {};
-        init(otw, ctx);
+        transfer::public_transfer(amount_available, tx_context::sender(ctx));
+        event::emit(AmountWithdrawn {
+            recipient: tx_context::sender(ctx),
+            amount: amount
+        });
     }
 }
-
